@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gozo Pantry · Support assistant</title>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; background: #f6f3ee; color: #222; margin: 0; }
+    main { max-width: 720px; margin: 0 auto; padding: 24px 16px 120px; }
+    h1 { font-size: 20px; margin: 0 0 4px; } .sub { color: #777; margin: 0 0 20px; }
+    .msg { margin: 10px 0; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; }
+    .user { background: #1f5f8b; color: #fff; margin-left: 20%; }
+    .assistant { background: #fff; margin-right: 20%; }
+    .system { color: #777; font-size: 13px; margin: 4px 0; padding-left: 4px; }
+    .card { background: #fff; border: 1px solid #d9cfc0; border-left: 4px solid #c58b2a; border-radius: 10px; padding: 14px; margin: 12px 0; }
+    .card.destructive { border-left-color: #c0392b; }
+    .card p { margin: 0 0 10px; font-size: 16px; }
+    .card details { font-size: 12px; color: #666; margin-bottom: 10px; }
+    .card pre { background: #f4f4f4; padding: 8px; border-radius: 6px; overflow-x: auto; }
+    button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid #aaa; background: #fff; cursor: pointer; }
+    button.approve { background: #2e7d32; border-color: #2e7d32; color: #fff; }
+    .destructive button.approve { background: #c0392b; border-color: #c0392b; }
+    button:disabled { opacity: .5; cursor: default; }
+    form { position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #ddd; padding: 12px; }
+    form div { max-width: 720px; margin: 0 auto; display: flex; gap: 8px; }
+    input { flex: 1; font: inherit; padding: 8px 12px; border: 1px solid #bbb; border-radius: 8px; }
+    .chips button { font-size: 13px; margin: 0 6px 6px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Gozo Pantry support assistant</h1>
+  <p class="sub">Refunds and account deletions go through an approval policy before they reach you.</p>
+  <div class="chips">
+    <button data-prompt="Refund order 1042 in full.">Refund #1042 in full</button>
+    <button data-prompt="Refund order 1045 in full, the customer says the kit never arrived.">Refund #1045 again</button>
+    <button data-prompt="Refund €3 on order 1043, one jar of tomatoes was cracked.">€3 refund on #1043</button>
+    <button data-prompt="Delete the customer who placed order 1043.">Delete Joseph's account</button>
+  </div>
+  <div id="log"></div>
+</main>
+<form id="form"><div><input id="input" placeholder="Ask about an order…" autocomplete="off"><button>Send</button></div></form>
+<script>
+  const log = document.getElementById('log'), form = document.getElementById('form'), input = document.getElementById('input');
+  const add = (cls, text = '') => log.appendChild(Object.assign(document.createElement('div'), { className: cls, textContent: text }));
+  const escape = s => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+  const bold = s => escape(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  const statusText = {
+    executed: t => `✓ ${t} ran`, auto_approved: t => `Auto-approved ${t} (within policy)`,
+    auto_rejected: (t, d) => `Blocked ${t}: ${d}`, approved: () => 'Approved ✓, continuing…',
+    denied: () => 'Denied ✗', timed_out: () => 'No answer in time, so it was denied'
+  };
+
+  function approvalCard(e) {
+    const card = add('card' + (e.destructive ? ' destructive' : ''));
+    card.innerHTML = `<p>${bold(e.message)}</p>
+      <details><summary>Technical details: ${escape(e.tool)}</summary><pre>${escape(JSON.stringify(e.arguments, null, 2))}</pre></details>
+      <button class="approve">${e.destructive ? 'Delete' : 'Approve'}</button> <button class="deny">Deny</button>`;
+    const buttons = card.querySelectorAll('button');
+    buttons.forEach(b => b.onclick = async () => {
+      buttons.forEach(x => x.disabled = true);
+      const res = await fetch(`/approvals/${e.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: b.classList.contains('approve') }) });
+      if (!res.ok) add('system', 'That approval has expired.');
+    });
+  }
+
+  async function send(message) {
+    add('msg user', message);
+    form.querySelector('button').disabled = input.disabled = true;
+    let bubble = null, buffer = '';
+    const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message }) });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (let r = await reader.read(); !r.done; r = await reader.read()) {
+      buffer += r.value;
+      const frames = buffer.split('\n\n'); buffer = frames.pop();
+      for (const frame of frames) {
+        const type = frame.match(/^event: (.*)$/m)?.[1], data = JSON.parse(frame.match(/^data: (.*)$/m)?.[1] ?? '{}');
+        if (type === 'text') (bubble ??= add('msg assistant')).textContent += data.text;
+        else if (type === 'approval_required') { approvalCard(data); bubble = null; }
+        else if (type === 'tool_status') { add('system', statusText[data.status]?.(data.tool, data.detail) ?? data.status); bubble = null; }
+      }
+    }
+    form.querySelector('button').disabled = input.disabled = false;
+    input.focus();
+  }
+
+  form.onsubmit = e => { e.preventDefault(); if (input.value.trim()) { send(input.value.trim()); input.value = ''; } };
+  document.querySelectorAll('.chips button').forEach(b => b.onclick = () => send(b.dataset.prompt));
+</script>
+</body>
+</html>
